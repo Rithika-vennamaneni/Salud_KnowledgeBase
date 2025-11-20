@@ -12,3 +12,4 @@ temp_*.pdf
 *.tmp
 .vscode/
 .idea/
+.env

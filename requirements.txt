@@ -57,3 +57,15 @@ pytest-cov==4.1.0
 
 # Chrome WebDriver (will be auto-managed by webdriver-manager)
 # chromedriver-binary==117.0.5938.149.0
+groq>=0.4.0
+pdfplumber>=0.10.0
+python-dotenv>=1.0.0
+tenacity>=8.2.0
+
+azure-storage-blob>=12.14.1
+azure-ai-documentintelligence>=1.0.0
+python-dotenv
+psycopg2-binary
+
+azure-storage-blob>=12.19.0
+python-dotenv>=1.0.0

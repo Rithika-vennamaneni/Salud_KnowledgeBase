@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
 """
-Payer Portal Crawler - Dynamic Knowledge Base
+Payer Portal Crawler - Dynamic Knowledge Base with Azure Storage
 Healthcare Knowledge Base System
 
-This module crawls healthcare payer portals to extract:
-- Prior authorization requirements
-- Timely filing rules  
-- Claim submission guidelines
-- Appeals processes
-
-Target Payers (Phase 1):
-1. United Healthcare
-2. Anthem/Elevance Health (BCBS)
-3. Aetna
-
-Author: Development Team
-Date: October 2025
+This module crawls healthcare payer portals and uploads PDFs to Azure Storage
 """
 
 import time
@@ -48,33 +36,46 @@ import re
 import os
 from urllib.parse import urljoin, urlparse
 
+# Azure and environment setup
+from azure_pdf_uploader import AzurePDFUploader
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 class PayerPortalCrawler:
     """
-    Comprehensive crawler for healthcare payer portals
-    Handles dynamic content, login requirements, and structured data extraction
+    Comprehensive crawler for healthcare payer portals with Azure Storage integration
     """
     
     def __init__(self, headless: bool = True, timeout: int = 30):
         """
-        Initialize the crawler with Chrome WebDriver
-        
-        Args:
-            headless: Run browser in headless mode
-            timeout: Default timeout for web elements
+        Initialize the crawler with Chrome WebDriver and Azure connection
         """
         self.timeout = timeout
         self.setup_logging()
         
-        # Create downloads directory
+        # Create downloads directory (for temporary storage if needed)
         self.downloads_dir = Path("payer_pdfs")
         self.downloads_dir.mkdir(exist_ok=True)
+        
+        # Initialize requests session for PDF downloads
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
         
         self.setup_webdriver(headless)
         self.results = {}
         
         # Define target payers and their portal configurations
         self.payer_configs = self._load_payer_configurations()
+        
+        # Initialize Azure uploader
+        connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+        container_name = os.getenv("AZURE_CONTAINER_NAME", "pdfs")
+        self.azure_uploader = AzurePDFUploader(connection_string, container_name)
+        print("✅ Azure Storage connected!")
         
     def setup_logging(self):
         """Setup logging configuration"""
@@ -102,7 +103,7 @@ class PayerPortalCrawler:
         chrome_options.add_argument('--window-size=1920,1080')
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         
-        # Configure download settings (only if downloads_dir is available)
+        # Configure download settings
         prefs = {
             "profile.managed_default_content_settings.images": 2,
             "profile.default_content_setting_values.notifications": 2,
@@ -111,7 +112,6 @@ class PayerPortalCrawler:
             "plugins.always_open_pdf_externally": True
         }
         
-        # Add download directory if it exists
         if hasattr(self, 'downloads_dir'):
             prefs["download.default_directory"] = str(self.downloads_dir.absolute())
             
@@ -151,8 +151,8 @@ class PayerPortalCrawler:
                         "appeal procedures", "grievances"
                     ]
                 },
-                "login_required": False,  # Start with public areas
-                "rate_limit": 2  # seconds between requests
+                "login_required": False,
+                "rate_limit": 2
             },
             
             "anthem": {
@@ -219,15 +219,97 @@ class PayerPortalCrawler:
             }
         }
     
+    def download_pdfs(self, payer_key: str) -> List[Dict]:
+        """
+        Download PDFs for a specific payer and upload to Azure
+        """
+        if payer_key not in self.payer_configs:
+            self.logger.error(f"Unknown payer: {payer_key}")
+            return []
+        
+        config = self.payer_configs[payer_key]
+        pdf_results = []
+        
+        try:
+            # Navigate to provider portal
+            self.driver.get(config['provider_portal'])
+            self.wait_for_page_load()
+            
+            # Find PDF links on the page
+            pdf_links = self._find_pdf_links()
+            
+            # Filter relevant PDFs
+            relevant_pdfs = self._filter_relevant_pdfs(pdf_links, config)
+            
+            # Also include direct PDF URLs if available
+            if 'direct_pdf_urls' in config:
+                for url in config['direct_pdf_urls']:
+                    relevant_pdfs.append({
+                        'url': url,
+                        'text': 'Direct PDF',
+                        'filename': os.path.basename(urlparse(url).path),
+                        'relevance_score': 10
+                    })
+            
+            self.logger.info(f"Found {len(relevant_pdfs)} relevant PDFs for {config['name']}")
+            
+            # Download and upload each PDF
+            for i, pdf_info in enumerate(relevant_pdfs[:20], 1):  # Limit to 20 PDFs
+                self.logger.info(f"Processing PDF {i}/{min(len(relevant_pdfs), 20)}: {pdf_info['filename']}")
+                
+                blob_url = self.download_pdf(pdf_info['url'], payer_key)
+                
+                if blob_url:
+                    pdf_results.append({
+                        'source_url': pdf_info['url'],
+                        'azure_url': blob_url,
+                        'filename': pdf_info['filename'],
+                        'status': 'uploaded'
+                    })
+                
+                # Rate limiting
+                time.sleep(config['rate_limit'])
+            
+            return pdf_results
+            
+        except Exception as e:
+            self.logger.error(f"Error downloading PDFs for {payer_key}: {e}")
+            return pdf_results
+    
+    def download_pdf(self, pdf_url: str, payer_name: str) -> Optional[str]:
+        """
+        Download a single PDF and upload to Azure Storage
+        """
+        try:
+            self.logger.info(f"Downloading: {pdf_url}")
+            
+            # Download PDF
+            response = self.session.get(pdf_url, timeout=30)
+            response.raise_for_status()
+            pdf_content = response.content
+            
+            # Upload to Azure
+            blob_url = self.azure_uploader.upload_pdf_from_url(
+                pdf_url=pdf_url,
+                pdf_content=pdf_content,
+                payer_name=payer_name,
+                metadata={
+                    "crawl_date": datetime.now().isoformat(),
+                    "file_size": str(len(pdf_content)),
+                    "source_url": pdf_url
+                }
+            )
+            
+            print(f"✅ Uploaded to Azure: {pdf_url.split('/')[-1]}")
+            return blob_url
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error uploading {pdf_url}: {e}")
+            return None
+    
     def crawl_payer(self, payer_key: str) -> Dict:
         """
         Crawl a specific payer portal
-        
-        Args:
-            payer_key: Key for payer configuration
-            
-        Returns:
-            Dictionary containing extracted data
         """
         if payer_key not in self.payer_configs:
             raise ValueError(f"Unknown payer: {payer_key}")
@@ -249,7 +331,7 @@ class PayerPortalCrawler:
             # Follow relevant links for deeper extraction
             detailed_data = self._crawl_detailed_sections(extracted_data, config)
             
-            # Download and extract PDFs
+            # Download and upload PDFs to Azure
             self.logger.info(f"Starting PDF download for {config['name']}")
             pdf_data = self.download_pdfs(payer_key)
             
@@ -261,7 +343,7 @@ class PayerPortalCrawler:
                 'pdf_documents': pdf_data,
                 'metadata': {
                     'total_pages_crawled': len(detailed_data.get('pages_visited', [])),
-                    'total_pdfs_downloaded': len(pdf_data),
+                    'total_pdfs_uploaded': len(pdf_data),
                     'content_types_found': list(detailed_data.get('content_summary', {}).keys())
                 }
             }
@@ -277,11 +359,9 @@ class PayerPortalCrawler:
     def _extract_page_content(self, config: Dict) -> Dict:
         """Extract content from current page"""
         try:
-            # Get page source
             html_content = self.driver.page_source
             soup = BeautifulSoup(html_content, 'html.parser')
             
-            # Extract structured data
             page_data = {
                 'title': soup.title.string if soup.title else '',
                 'url': self.driver.current_url,
@@ -308,10 +388,8 @@ class PayerPortalCrawler:
             if not text:
                 continue
                 
-            # Convert relative URLs to absolute
             full_url = urljoin(base_url, href)
             
-            # Filter for relevant links
             if self._is_relevant_link(text, href):
                 links.append({
                     'text': text,
@@ -322,7 +400,7 @@ class PayerPortalCrawler:
         return links
     
     def _is_relevant_link(self, text: str, href: str) -> bool:
-        """Determine if a link is relevant for our crawling"""
+        """Determine if a link is relevant"""
         text_lower = text.lower()
         href_lower = href.lower()
         
@@ -354,17 +432,15 @@ class PayerPortalCrawler:
             return 'general'
     
     def _extract_sections(self, soup: BeautifulSoup) -> List[Dict]:
-        """Extract main content sections from the page"""
+        """Extract main content sections"""
         sections = []
         
-        # Look for common section headers
         for header in soup.find_all(['h1', 'h2', 'h3', 'h4']):
             header_text = header.get_text(strip=True)
             
             if not header_text:
                 continue
                 
-            # Find content following this header
             content_elements = []
             for sibling in header.find_next_siblings():
                 if sibling.name in ['h1', 'h2', 'h3', 'h4']:
@@ -381,7 +457,7 @@ class PayerPortalCrawler:
         return sorted(sections, key=lambda x: x['relevance_score'], reverse=True)
     
     def _calculate_relevance_score(self, text: str) -> float:
-        """Calculate relevance score for content"""
+        """Calculate relevance score"""
         text_lower = text.lower()
         
         high_value_keywords = [
@@ -411,7 +487,6 @@ class PayerPortalCrawler:
             href = link['href']
             text = link.get_text(strip=True)
             
-            # Check for document extensions
             if any(ext in href.lower() for ext in ['.pdf', '.doc', '.docx', '.xls', '.xlsx']):
                 downloads.append({
                     'text': text,
@@ -422,92 +497,9 @@ class PayerPortalCrawler:
         
         return sorted(downloads, key=lambda x: x['relevance_score'], reverse=True)
     
-    def download_pdfs(self, payer_key: str) -> List[Dict]:
-        """Download PDFs from payer websites for different geographic zones"""
-        config = self.payer_configs[payer_key]
-        downloaded_pdfs = []
-        all_pdf_links = []
-        
-        self.logger.info(f"Starting PDF download for {config['name']}")
-        
-        # Check if this payer has direct PDF URLs
-        if 'direct_pdf_urls' in config:
-            self.logger.info(f"Using direct PDF URLs for {config['name']}")
-            for pdf_url in config['direct_pdf_urls']:
-                filename = os.path.basename(pdf_url.split('?')[0])  # Remove query params
-                all_pdf_links.append({
-                    'url': pdf_url,
-                    'text': filename,
-                    'filename': filename,
-                    'relevance_score': 5  # High relevance for direct URLs
-                })
-        else:
-            # Standard web crawling approach
-            pages_to_search = [config['provider_portal']]
-            if 'additional_pages' in config:
-                pages_to_search.extend(config['additional_pages'])
-            
-            try:
-                # Search for PDFs across multiple pages
-                for page_url in pages_to_search:
-                    try:
-                        self.logger.info(f"Searching for PDFs on: {page_url}")
-                        self.driver.get(page_url)
-                        self.wait_for_page_load()
-                        
-                        # Find PDF links on this page
-                        page_pdf_links = self._find_pdf_links()
-                        all_pdf_links.extend(page_pdf_links)
-                        
-                        # Rate limiting between pages
-                        time.sleep(config['rate_limit'])
-                        
-                    except Exception as e:
-                        self.logger.warning(f"Failed to search page {page_url}: {e}")
-                        continue
-                
-                # Remove duplicates based on URL
-                unique_pdfs = {}
-                for pdf_info in all_pdf_links:
-                    unique_pdfs[pdf_info['url']] = pdf_info
-                all_pdf_links = list(unique_pdfs.values())
-                
-                # Filter for relevant PDFs (provider manuals, guidelines, etc.)
-                all_pdf_links = self._filter_relevant_pdfs(all_pdf_links, config)
-                
-            except Exception as e:
-                self.logger.error(f"Error in PDF search process: {e}")
-        
-        self.logger.info(f"Found {len(all_pdf_links)} total PDFs to download")
-        
-        # Download PDFs
-        for pdf_info in all_pdf_links[:15]:  # Limit to top 15 most relevant
-            try:
-                downloaded_file = self._download_pdf(pdf_info, payer_key)
-                if downloaded_file:
-                    # Extract content from PDF
-                    pdf_content = self._extract_pdf_content(downloaded_file)
-                    
-                    pdf_info.update({
-                        'local_file': downloaded_file,
-                        'extracted_content': pdf_content,
-                        'download_timestamp': datetime.now().isoformat()
-                    })
-                    downloaded_pdfs.append(pdf_info)
-                    
-                    self.logger.info(f"Successfully downloaded and extracted: {pdf_info['filename']}")
-                    
-            except Exception as e:
-                self.logger.error(f"Failed to download PDF {pdf_info['url']}: {e}")
-                continue
-                
-        return downloaded_pdfs
-    
     def _find_pdf_links(self) -> List[Dict]:
-        """Find all PDF links on the current page"""
+        """Find all PDF links on current page"""
         pdf_links = []
-        
-        # Get page source and find PDF links
         soup = BeautifulSoup(self.driver.page_source, 'html.parser')
         
         for link in soup.find_all('a', href=True):
@@ -515,7 +507,6 @@ class PayerPortalCrawler:
             text = link.get_text(strip=True)
             
             if href.lower().endswith('.pdf') or '.pdf' in href.lower():
-                # Convert relative URLs to absolute
                 full_url = urljoin(self.driver.current_url, href)
                 
                 pdf_links.append({
@@ -527,10 +518,9 @@ class PayerPortalCrawler:
         return pdf_links
     
     def _filter_relevant_pdfs(self, pdf_links: List[Dict], config: Dict) -> List[Dict]:
-        """Filter PDFs based on relevance to our target content"""
+        """Filter PDFs based on relevance"""
         relevant_pdfs = []
         
-        # Keywords that indicate relevant content
         relevant_keywords = [
             'provider', 'manual', 'guide', 'policy', 'procedure', 'billing',
             'prior auth', 'authorization', 'timely filing', 'appeals',
@@ -540,205 +530,16 @@ class PayerPortalCrawler:
         
         for pdf_info in pdf_links:
             text_to_check = (pdf_info['text'] + ' ' + pdf_info['filename']).lower()
-            
-            # Calculate relevance score
             relevance_score = sum(1 for keyword in relevant_keywords if keyword in text_to_check)
             
             if relevance_score > 0:
                 pdf_info['relevance_score'] = relevance_score
                 relevant_pdfs.append(pdf_info)
         
-        # Sort by relevance score
         return sorted(relevant_pdfs, key=lambda x: x['relevance_score'], reverse=True)
     
-    def _download_pdf(self, pdf_info: Dict, payer_key: str) -> Optional[str]:
-        """Download a single PDF file"""
-        try:
-            # Create payer-specific directory
-            payer_dir = self.downloads_dir / payer_key
-            payer_dir.mkdir(exist_ok=True)
-            
-            # Clean filename
-            clean_filename = re.sub(r'[^\w\-_\.]', '_', pdf_info['filename'])
-            local_file = payer_dir / clean_filename
-            
-            # Enhanced headers to mimic browser request
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'application/pdf,application/octet-stream,*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-            }
-            
-            # Download using requests with enhanced headers
-            session = requests.Session()
-            response = session.get(pdf_info['url'], headers=headers, timeout=30, stream=True, allow_redirects=True)
-            response.raise_for_status()
-            
-            # Check if response is actually a PDF
-            content_type = response.headers.get('content-type', '').lower()
-            
-            # Download content
-            total_size = 0
-            with open(local_file, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        total_size += len(chunk)
-            
-            # Check file size
-            if total_size < 1000:
-                self.logger.warning(f"Downloaded file seems too small: {total_size} bytes")
-                os.remove(local_file)
-                return None
-            
-            self.logger.info(f"Successfully downloaded PDF: {clean_filename} ({total_size} bytes)")
-            return str(local_file)
-            
-        except Exception as e:
-            self.logger.error(f"Failed to download PDF from {pdf_info['url']}: {e}")
-            return None
-    
-    def _extract_pdf_content(self, pdf_file: str) -> Dict:
-        """Extract content from a PDF file"""
-        content = {
-            'text': '',
-            'pages': [],
-            'extracted_rules': [],
-            'geographic_zones': [],
-            'extraction_method': 'pymupdf'
-        }
-        
-        try:
-            # Use PyMuPDF (fitz) for better text extraction
-            doc = fitz.open(pdf_file)
-            
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                page_text = page.get_text()
-                
-                content['pages'].append({
-                    'page_number': page_num + 1,
-                    'text': page_text
-                })
-                content['text'] += page_text + '\n'
-            
-            doc.close()
-            
-            # Extract structured information
-            content['extracted_rules'] = self._extract_rules_from_text(content['text'])
-            content['geographic_zones'] = self._extract_geographic_zones(content['text'])
-            
-        except Exception as e:
-            self.logger.error(f"PyMuPDF extraction failed, trying PyPDF2: {e}")
-            
-            # Fallback to PyPDF2
-            try:
-                with open(pdf_file, 'rb') as file:
-                    pdf_reader = PyPDF2.PdfReader(file)
-                    
-                    for page_num, page in enumerate(pdf_reader.pages):
-                        page_text = page.extract_text()
-                        content['pages'].append({
-                            'page_number': page_num + 1,
-                            'text': page_text
-                        })
-                        content['text'] += page_text + '\n'
-                
-                content['extraction_method'] = 'pypdf2'
-                content['extracted_rules'] = self._extract_rules_from_text(content['text'])
-                content['geographic_zones'] = self._extract_geographic_zones(content['text'])
-                
-            except Exception as e2:
-                self.logger.error(f"PDF extraction failed completely: {e2}")
-                content['error'] = str(e2)
-        
-        return content
-    
-    def _extract_rules_from_text(self, text: str) -> List[Dict]:
-        """Extract payer rules from PDF text"""
-        rules = []
-        text_lower = text.lower()
-        
-        # Define rule patterns
-        rule_patterns = {
-            'prior_authorization': [
-                r'prior authorization.*?(?=\n\n|\n[A-Z]|$)',
-                r'preauthorization.*?(?=\n\n|\n[A-Z]|$)',
-                r'authorization required.*?(?=\n\n|\n[A-Z]|$)'
-            ],
-            'timely_filing': [
-                r'timely filing.*?(?=\n\n|\n[A-Z]|$)',
-                r'filing deadline.*?(?=\n\n|\n[A-Z]|$)',
-                r'submit.*?within.*?days.*?(?=\n\n|\n[A-Z]|$)'
-            ],
-            'appeals': [
-                r'appeal.*?process.*?(?=\n\n|\n[A-Z]|$)',
-                r'grievance.*?procedure.*?(?=\n\n|\n[A-Z]|$)',
-                r'dispute.*?resolution.*?(?=\n\n|\n[A-Z]|$)'
-            ]
-        }
-        
-        for rule_type, patterns in rule_patterns.items():
-            for pattern in patterns:
-                matches = re.finditer(pattern, text, re.IGNORECASE | re.DOTALL)
-                for match in matches:
-                    rule_text = match.group().strip()
-                    if len(rule_text) > 50:  # Filter out very short matches
-                        rules.append({
-                            'type': rule_type,
-                            'content': rule_text,
-                            'confidence': len(rule_text) / 1000  # Simple confidence based on length
-                        })
-        
-        return rules
-    
-    def _extract_geographic_zones(self, text: str) -> List[Dict]:
-        """Extract geographic zone information from PDF text"""
-        zones = []
-        text_lower = text.lower()
-        
-        # Common geographic identifiers
-        state_patterns = [
-            r'(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming)',
-            r'(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy)'
-        ]
-        
-        region_patterns = [
-            r'region\s+\d+',
-            r'zone\s+[a-z0-9]+',
-            r'area\s+[a-z0-9]+',
-            r'network\s+[a-z0-9]+',
-            r'service\s+area'
-        ]
-        
-        # Extract state mentions
-        for pattern in state_patterns:
-            matches = re.finditer(pattern, text_lower)
-            for match in matches:
-                zones.append({
-                    'type': 'state',
-                    'value': match.group().upper(),
-                    'context': text[max(0, match.start()-50):match.end()+50]
-                })
-        
-        # Extract region/zone mentions
-        for pattern in region_patterns:
-            matches = re.finditer(pattern, text_lower)
-            for match in matches:
-                zones.append({
-                    'type': 'region',
-                    'value': match.group(),
-                    'context': text[max(0, match.start()-50):match.end()+50]
-                })
-        
-        return zones
-    
     def _find_target_sections(self, page_data: Dict, config: Dict) -> Dict:
-        """Find content sections matching our target areas"""
+        """Find content sections matching target areas"""
         target_sections = config['target_sections']
         found_content = {}
         
@@ -749,17 +550,14 @@ class PayerPortalCrawler:
                 'documents': []
             }
             
-            # Search in page sections
             for section in page_data.get('sections', []):
                 if self._matches_keywords(section['header'] + ' ' + section['content'], keywords):
                     found_content[section_type]['sections'].append(section)
             
-            # Search in links
             for link in page_data.get('links', []):
                 if self._matches_keywords(link['text'], keywords):
                     found_content[section_type]['links'].append(link)
             
-            # Search in documents
             for doc in page_data.get('download_links', []):
                 if self._matches_keywords(doc['text'], keywords):
                     found_content[section_type]['documents'].append(doc)
@@ -767,12 +565,12 @@ class PayerPortalCrawler:
         return found_content
     
     def _matches_keywords(self, text: str, keywords: List[str]) -> bool:
-        """Check if text contains any of the target keywords"""
+        """Check if text contains target keywords"""
         text_lower = text.lower()
         return any(keyword.lower() in text_lower for keyword in keywords)
     
     def _crawl_detailed_sections(self, extracted_data: Dict, config: Dict) -> Dict:
-        """Crawl deeper into relevant links for detailed information"""
+        """Crawl deeper into relevant links"""
         detailed_data = {
             'pages_visited': [],
             'content_summary': {},
@@ -781,13 +579,11 @@ class PayerPortalCrawler:
             'appeals': {'rules': [], 'documents': []}
         }
         
-        # Limit the number of pages to crawl to avoid rate limiting
         max_pages_per_section = 3
         
         for section_type, content in extracted_data.items():
             pages_crawled = 0
             
-            # Crawl high-relevance links
             for link in content.get('links', [])[:max_pages_per_section]:
                 if pages_crawled >= max_pages_per_section:
                     break
@@ -795,8 +591,6 @@ class PayerPortalCrawler:
                 try:
                     self._crawl_individual_page(link['url'], section_type, detailed_data)
                     pages_crawled += 1
-                    
-                    # Rate limiting
                     time.sleep(config['rate_limit'])
                     
                 except Exception as e:
@@ -806,16 +600,14 @@ class PayerPortalCrawler:
         return detailed_data
     
     def _crawl_individual_page(self, url: str, section_type: str, detailed_data: Dict):
-        """Crawl an individual page for specific content"""
+        """Crawl an individual page"""
         try:
             self.driver.get(url)
             self.wait_for_page_load()
             
-            # Extract content from this page
             html_content = self.driver.page_source
             soup = BeautifulSoup(html_content, 'html.parser')
             
-            # Extract relevant information
             page_info = {
                 'url': url,
                 'title': soup.title.string if soup.title else '',
@@ -826,7 +618,6 @@ class PayerPortalCrawler:
             
             detailed_data['pages_visited'].append(page_info)
             
-            # Add rules to appropriate section
             if section_type in detailed_data:
                 detailed_data[section_type]['rules'].extend(page_info['extracted_rules'])
             
@@ -837,12 +628,9 @@ class PayerPortalCrawler:
             raise
     
     def _extract_rules_from_page(self, soup: BeautifulSoup, section_type: str) -> List[Dict]:
-        """Extract specific rules and requirements from a page"""
+        """Extract rules from page"""
         rules = []
         
-        # Look for structured content like lists, tables, and specific sections
-        
-        # Extract from lists
         for ul in soup.find_all('ul'):
             list_items = [li.get_text(strip=True) for li in ul.find_all('li')]
             if any(self._is_rule_content(item, section_type) for item in list_items):
@@ -851,17 +639,6 @@ class PayerPortalCrawler:
                     for item in list_items if self._is_rule_content(item, section_type)
                 ])
         
-        # Extract from tables
-        for table in soup.find_all('table'):
-            table_data = self._extract_table_data(table)
-            if table_data and self._is_relevant_table(table_data, section_type):
-                rules.append({
-                    'type': 'table',
-                    'content': table_data,
-                    'source': 'table'
-                })
-        
-        # Extract from paragraphs with specific keywords
         for p in soup.find_all('p'):
             text = p.get_text(strip=True)
             if self._is_rule_content(text, section_type):
@@ -874,7 +651,7 @@ class PayerPortalCrawler:
         return rules
     
     def _is_rule_content(self, text: str, section_type: str) -> bool:
-        """Determine if text contains rule-like content"""
+        """Determine if text contains rule content"""
         text_lower = text.lower()
         
         rule_indicators = {
@@ -895,28 +672,6 @@ class PayerPortalCrawler:
         indicators = rule_indicators.get(section_type, [])
         return any(indicator in text_lower for indicator in indicators) and len(text) > 20
     
-    def _extract_table_data(self, table) -> List[List[str]]:
-        """Extract data from HTML table"""
-        rows = []
-        for tr in table.find_all('tr'):
-            row = [td.get_text(strip=True) for td in tr.find_all(['td', 'th'])]
-            if any(cell for cell in row):  # Skip empty rows
-                rows.append(row)
-        return rows
-    
-    def _is_relevant_table(self, table_data: List[List[str]], section_type: str) -> bool:
-        """Check if table contains relevant information"""
-        table_text = ' '.join([' '.join(row) for row in table_data]).lower()
-        
-        relevant_keywords = {
-            'prior_authorization': ['authorization', 'approval', 'required'],
-            'timely_filing': ['days', 'deadline', 'filing', 'submission'],
-            'appeals': ['appeal', 'dispute', 'grievance', 'review']
-        }
-        
-        keywords = relevant_keywords.get(section_type, [])
-        return any(keyword in table_text for keyword in keywords)
-    
     def wait_for_page_load(self, timeout: int = None):
         """Wait for page to fully load"""
         timeout = timeout or self.timeout
@@ -924,7 +679,7 @@ class PayerPortalCrawler:
             WebDriverWait(self.driver, timeout).until(
                 lambda driver: driver.execute_script("return document.readyState") == "complete"
             )
-            time.sleep(2)  # Additional wait for dynamic content
+            time.sleep(2)
         except TimeoutException:
             self.logger.warning("Page load timeout - continuing anyway")
     
@@ -939,24 +694,20 @@ class PayerPortalCrawler:
                 result = self.crawl_payer(payer_key)
                 all_results[payer_key] = result
                 
-                # Save intermediate results
                 self.save_results(all_results, f"crawl_results_partial_{payer_key}.json")
-                
-                # Pause between payers to be respectful
                 time.sleep(5)
                 
             except Exception as e:
                 self.logger.error(f"Failed to crawl {payer_key}: {e}")
                 all_results[payer_key] = {'error': str(e)}
         
-        # Save final results
         self.save_results(all_results, "crawl_results_final.json")
         
         self.logger.info(f"Completed crawling {len(all_results)} payers")
         return all_results
     
     def save_results(self, results: Dict, filename: str):
-        """Save crawling results to JSON file"""
+        """Save crawling results to JSON"""
         try:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(results, f, indent=2, ensure_ascii=False, default=str)
@@ -965,7 +716,7 @@ class PayerPortalCrawler:
             self.logger.error(f"Failed to save results: {e}")
     
     def generate_summary_report(self, results: Dict) -> Dict:
-        """Generate summary report of crawling results"""
+        """Generate summary report"""
         summary = {
             'crawl_timestamp': datetime.now().isoformat(),
             'total_payers': len(results),
@@ -979,9 +730,7 @@ class PayerPortalCrawler:
                 payer_summary = {
                     'payer_name': result.get('payer', 'Unknown'),
                     'pages_crawled': len(result.get('extracted_content', {}).get('pages_visited', [])),
-                    'prior_auth_rules': len(result.get('extracted_content', {}).get('prior_authorization', {}).get('rules', [])),
-                    'timely_filing_rules': len(result.get('extracted_content', {}).get('timely_filing', {}).get('rules', [])),
-                    'appeals_rules': len(result.get('extracted_content', {}).get('appeals', {}).get('rules', []))
+                    'pdfs_uploaded': len(result.get('pdf_documents', []))
                 }
             else:
                 payer_summary = {'error': result['error']}
@@ -999,8 +748,9 @@ class PayerPortalCrawler:
 
 def main():
     """Main execution function"""
-    print("=== Payer Portal Crawler - Healthcare Knowledge Base ===")
+    print("=== Payer Portal Crawler with Azure Storage ===")
     print("Starting crawl of top 3 payers: United Healthcare, Anthem, Aetna")
+    print("PDFs will be uploaded directly to Azure Storage")
     
     crawler = None
     try:
@@ -1026,13 +776,13 @@ def main():
             if 'error' not in payer_summary:
                 print(f"\n{payer_summary['payer_name']}:")
                 print(f"  Pages crawled: {payer_summary['pages_crawled']}")
-                print(f"  Prior auth rules: {payer_summary['prior_auth_rules']}")
-                print(f"  Timely filing rules: {payer_summary['timely_filing_rules']}")
-                print(f"  Appeals rules: {payer_summary['appeals_rules']}")
+                print(f"  PDFs uploaded to Azure: {payer_summary['pdfs_uploaded']}")
             else:
                 print(f"\n{payer_key}: ERROR - {payer_summary['error']}")
         
         print("\n=== CRAWLING COMPLETED ===")
+        print("Check Azure Portal to see your uploaded PDFs!")
+        print("Go to: Storage Account → Containers → pdfs")
         
     except Exception as e:
         print(f"Critical error: {e}")

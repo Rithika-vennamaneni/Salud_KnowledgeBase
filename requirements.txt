@@ -1,76 +1,16 @@
-# Payer Portal Crawler Dependencies
-# Healthcare Payer Knowledge Base System
+# Core RAG dependencies
+sentence-transformers>=2.2.2
+chromadb>=0.4.22
+anthropic>=0.40.0
+numpy>=1.24.0
 
-# Web Scraping and Automation
-selenium==4.15.0
-beautifulsoup4==4.12.2
-requests==2.31.0
-
-# Web Driver Management
-webdriver-manager==4.0.1
-
-# Data Processing
-pandas==2.1.3
-numpy==1.25.2
-
-# HTML/XML Processing
-lxml==4.9.3
-
-# Date/Time Processing
-python-dateutil==2.8.2
-
-# Logging and Configuration
-python-dotenv==1.0.0
-
-# Database (for future integration)
-psycopg2-binary==2.9.7
-sqlalchemy==2.0.23
-
-# Data Validation
-pydantic==2.5.0
-
-# Progress Tracking
-tqdm==4.66.1
-
-# File Processing
-pathlib2==2.3.7
-
-# PDF Processing
-PyPDF2==3.0.1
-PyMuPDF==1.23.8
-
-# Regular Expressions (enhanced)
-regex==2023.10.3
-
-# Network/HTTP handling
-urllib3==2.1.0
-
-# JSON Processing
-ujson==5.8.0
-
-# Parallel Processing
-concurrent-futures==3.1.1
-
-# Development and Testing
-pytest==7.4.3
-pytest-cov==4.1.0
-
-# Chrome WebDriver (will be auto-managed by webdriver-manager)
-# chromedriver-binary==117.0.5938.149.0
-groq>=0.4.0
+# PDF processing (if not already installed)
+PyPDF2>=3.0.0
 pdfplumber>=0.10.0
-tenacity>=8.2.0
 
-azure-ai-documentintelligence>=1.0.0
-python-dotenv
-psycopg2-binary
-
-azure-storage-blob>=12.19.0
+# Utilities
+tqdm>=4.65.0
 python-dotenv>=1.0.0
 
-# Add these for Azure OCR + Storage
-azure-ai-documentintelligence==1.0.0b1
-azure-storage-blob>=12.19.0
-python-dateutil>=2.8.2
-
-
+# Optional: Better performance
+# torch>=2.0.0  # Uncomment for GPU support

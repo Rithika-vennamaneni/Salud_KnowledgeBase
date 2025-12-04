@@ -1,4 +1,17 @@
-# 🏥 Healthcare Payer Knowledge Base
+#  Healthcare Payer Knowledge Base & RAG Chatbot
+
+End‑to‑end system used for this submission:
+
+- Targeted crawler that finds payer policy PDFs on provider portals  
+- PDFs are uploaded into Azure Blob Storage  
+- PDFs are brought back down and converted into structured JSON policies  
+- The JSON policies are written back to Azure and deduplicated  
+- A combined JSON rules file (for example `healthcare_rules_export.json`) is exported  
+- A RAG chatbot (FastAPI backend + React frontend) answers questions on top of that rules file
+
+The rest of this README (below) contains the original crawler‑focused documentation and additional details.
+
+#  Healthcare Payer Knowledge Base
 
 **Automated Healthcare Payer Rule Extraction System**
 
@@ -8,7 +21,7 @@
 
 ---
 
-## 🎯 **Project Overview**
+##  **Project Overview**
 
 ### **Problem Statement**
 Healthcare revenue cycle teams face significant challenges:
@@ -20,37 +33,37 @@ Healthcare revenue cycle teams face significant challenges:
 
 ### **Solution**
 Our automated payer portal crawler:
-- ✅ **Extracts** payer rules from major healthcare portals automatically
-- ✅ **Structures** unorganized data into queryable JSON format
-- ✅ **Monitors** policy changes systematically 
-- ✅ **Centralizes** knowledge for conversational AI access
-- ✅ **Reduces** manual effort by 80%+ for revenue cycle teams
+-  **Extracts** payer rules from major healthcare portals automatically
+-  **Structures** unorganized data into queryable JSON format
+-  **Monitors** policy changes systematically 
+-  **Centralizes** knowledge for conversational AI access
+-  **Reduces** manual effort by 80%+ for revenue cycle teams
 
 ---
 
-## 🏗️ **System Architecture**
+##  **System Architecture**
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                Healthcare Knowledge Base                │
 ├─────────────────────────────────────────────────────────┤
-│  🌐 Web Crawler (Selenium)                            │
+│   Web Crawler (Selenium)                            │
 │     ├── Dynamic content handling                       │
 │     ├── Multi-payer portal navigation                  │
 │     └── Respectful crawling with rate limits           │
 │                                                         │
-│  📄 PDF Processor (PyMuPDF + PyPDF2)                  │
+│   PDF Processor (PyMuPDF + PyPDF2)                  │
 │     ├── Dual extraction methods                        │
 │     ├── Fallback processing                            │
 │     └── Content validation                             │
 │                                                         │
-│  🧠 Rule Extraction Engine                            │
+│   Rule Extraction Engine                            │
 │     ├── Regex pattern matching                         │
 │     ├── Content classification                         │
 │     ├── Geographic zone detection                      │
 │     └── JSON structure generation                      │
 │                                                         │
-│  💾 Knowledge Base                                     │
+│   Knowledge Base                                     │
 │     ├── Structured JSON output                         │
 │     ├── Queryable format                               │
 │     └── API-ready data                                 │
@@ -59,9 +72,9 @@ Our automated payer portal crawler:
 
 ---
 
-## 🚀 **Crawler Versions & Capabilities**
+##  **Crawler Versions & Capabilities**
 
-### **1. Basic Crawler** (`payer_portal_crawler.py`)
+### **1. Basic Crawler** (`crawler/payer_portal_crawler.py`)
 **Purpose**: Reliable baseline functionality for single payer extraction
 
 **Features**:
@@ -71,69 +84,40 @@ Our automated payer portal crawler:
 - Rate limiting and respectful crawling
 
 **Proven Results**:
-- ✅ **8 PDFs** downloaded from Anthem
-- ✅ **880+ pages** of content processed
-- ✅ **723 healthcare rules** extracted
-- ✅ Categories: Prior Authorization, Timely Filing, Appeals, Claims
+-  **8 PDFs** downloaded from Anthem
+-  **880+ pages** of content processed
+-  **723 healthcare rules** extracted
+-  Categories: Prior Authorization, Timely Filing, Appeals, Claims
 
 **Usage**:
 ```python
-from payer_portal_crawler import PayerPortalCrawler
+from crawler.payer_portal_crawler import PayerPortalCrawler
 
 crawler = PayerPortalCrawler()
 results = crawler.crawl_payer("anthem")
 ```
 
-### **2. CSV-Driven Crawler** (`intelligent_csv_crawler.py`)
-**Purpose**: Scalable approach for multiple payers with auto-discovery
+### **2. Targeted Healthcare Rule Crawler** (`crawler/targeted_healthcare_crawler.py`)
+**Purpose**: Focused discovery of PDFs that contain specific rule types (timely filing, prior auth, billing nuances, appeals) for multiple payers.
 
 **Features**:
-- CSV database of 15 major US healthcare payers
-- Automatic provider portal discovery
-- Intelligent domain pattern matching
-- Priority-based crawling
-- Batch processing capabilities
+- Uses curated payer configurations and Selenium to navigate provider portals  
+- Classifies links and PDFs by rule type before downloading  
+- Organizes downloads under `./targeted_pdfs/<payer>/<rule_type>/`  
+- Optionally uploads PDFs and extracted policies to Azure via `pipeline.azure_pdf_uploader` and `pipeline.policy_deduplication_system`
 
-**Proven Results**:
-- ✅ **15 major payers** configured (UHC, Anthem, Aetna, Kaiser, etc.)
-- ✅ **Auto-discovery**: Found 50+ provider portals
-- ✅ **Scalable**: Add new payers via CSV updates
-- ✅ **Zero manual configuration** needed
-
-**Usage**:
-```python
-from intelligent_csv_crawler import IntelligentCSVCrawler
-
-crawler = IntelligentCSVCrawler("payer_companies.csv")
-results = crawler.crawl_by_priority("high")
-```
-
-### **3. BFS Advanced Crawler** (`test_bfs_crawler.py`)
-**Purpose**: Maximum discovery using Breadth-First Search algorithm
+### **3. Azure-Integrated Crawler Pipeline** (`crawler/run_crawler_with_azure.py` + `pipeline/*`)
+**Purpose**: End‑to‑end flow from crawler → Azure Blob Storage → structured policies.
 
 **Features**:
-- Hierarchical link exploration (depth 2-3 levels)
-- Intelligent content pattern following
-- Hidden PDF repository discovery
-- Advanced portal structure mapping
-
-**Proven Results**:
-- ✅ **10x more content** than basic crawler
-- ✅ **79 PDFs** from United Healthcare in 1.9 minutes
-- ✅ **100+ PDFs** discoverable from Anthem
-- ✅ **State-specific variations** found automatically
-
-**Usage**:
-```python
-from test_bfs_crawler import SimpleBFSCrawler
-
-crawler = SimpleBFSCrawler(max_depth=3)
-results = crawler.discover_pdfs_bfs(starting_urls, allowed_domains)
-```
+- Runs the targeted crawler for a given payer  
+- Downloads PDFs from the Azure `pdfs` container  
+- Converts PDFs to policy JSON, deduplicates versions, and stores current policies in Azure  
+- Produces a clean policy store that can be exported into `healthcare_rules_export.json` for the RAG chatbot
 
 ---
 
-## 📋 **Quick Start Guide**
+##  **Quick Start Guide**
 
 ### **Installation**
 ```bash
@@ -142,26 +126,38 @@ cd Knowledge_Base_Demo
 pip install -r requirements.txt
 ```
 
-### **Interactive Demo**
+### **Run a basic crawl**
 ```bash
-python demo_launcher.py
+python crawler/payer_portal_crawler.py
 ```
 
-### **Basic Usage**
+### **Run the targeted multi-payer crawler**
 ```bash
-# Single payer extraction
-python examples/basic_usage.py
+python crawler/targeted_healthcare_crawler.py
+```
 
-# CSV-driven multi-payer
-python examples/csv_driven_example.py
+### **Run the RAG chatbot**
+```bash
+# 1) Start the FastAPI backend (expects /api/chat)
+uvicorn rag.api_server:app --reload --port 8000
 
-# Advanced BFS discovery
-python test_bfs_crawler.py
+# 2a) Serve the static frontend with Python (no build needed)
+cd frontend && python -m http.server 5173
+# or
+# 2b) Serve via npm (if you prefer)
+cd frontend && npm install && npm run start
+
+# 3) Open http://localhost:5173
+# Set API base to http://localhost:8000 in the UI and click Save.
+# Ask questions; include payer names (e.g., "UnitedHealthcare") to narrow results.
+
+Notes:
+- The frontend uses CDN React and Babel (type=\"text/babel\") so it runs without a build step. Keep serving from /frontend so ./main.js and ./style.css resolve.
 ```
 
 ---
 
-## 💡 **Configuration**
+##  **Configuration**
 
 ### **Payer Database** (`payer_companies.csv`)
 The system includes 15 major US healthcare payers:
@@ -183,7 +179,7 @@ company_name,base_domain,known_provider_portal,priority,market_share
 
 ---
 
-## 📊 **Performance Metrics**
+##  **Performance Metrics**
 
 ### **Discovery Capacity**
 - **Basic Crawler**: 8-20 PDFs per payer
@@ -208,7 +204,7 @@ company_name,base_domain,known_provider_portal,priority,market_share
 
 ### **Quality Filtering** (`intelligent_pdf_filter.py`)
 ```python
-from intelligent_pdf_filter import IntelligentPDFFilter
+from pipeline.intelligent_pdf_filter import IntelligentPDFFilter
 
 filter_system = IntelligentPDFFilter()
 results = filter_system.process_pdf_batch_with_filtering(pdf_urls)
@@ -216,7 +212,7 @@ results = filter_system.process_pdf_batch_with_filtering(pdf_urls)
 
 ### **Content Analysis** (`pdf_quality_analyzer.py`)
 ```python
-from pdf_quality_analyzer import PDFQualityAnalyzer
+from pipeline.pdf_quality_analyzer import PDFQualityAnalyzer
 
 analyzer = PDFQualityAnalyzer()
 results = analyzer.analyze_pdf_batch(pdf_urls)
@@ -224,7 +220,7 @@ results = analyzer.analyze_pdf_batch(pdf_urls)
 
 ### **Regional Coverage** (`regional_coverage_analyzer.py`)
 ```python
-from regional_coverage_analyzer import RegionalCoverageAnalyzer
+from pipeline.regional_coverage_analyzer import RegionalCoverageAnalyzer
 
 analyzer = RegionalCoverageAnalyzer()
 analysis = analyzer.analyze_payer_regional_coverage(payer_name, pdf_list)
@@ -232,21 +228,21 @@ analysis = analyzer.analyze_payer_regional_coverage(payer_name, pdf_list)
 
 ---
 
-## 📈 **Production Deployment**
+##  **Production Deployment**
 
 ### **Recommended Architecture**
 ```bash
 # 1. Basic extraction for reliable baseline
-python payer_portal_crawler.py
+python crawler/payer_portal_crawler.py
 
-# 2. CSV-driven for scalable multi-payer
-python intelligent_csv_crawler.py --priority high
+# 2. Targeted multi-payer crawl
+python crawler/targeted_healthcare_crawler.py
 
-# 3. BFS for comprehensive discovery
-python test_bfs_crawler.py --max-depth 3
+# 3. Run crawler + Azure pipeline with deduplication (example payer)
+python crawler/run_crawler_with_azure.py anthem
 
-# 4. Quality filtering for production data
-python intelligent_pdf_filter.py
+# 4. Run policy cleanup/deduplication on Azure store
+python -m pipeline.cleanup_policies
 ```
 
 ### **Expected Results**
@@ -257,7 +253,7 @@ python intelligent_pdf_filter.py
 
 ---
 
-## 🎯 **Use Cases**
+##  **Use Cases**
 
 ### **Revenue Cycle Management**
 - Automated payer rule discovery
@@ -279,7 +275,30 @@ python intelligent_pdf_filter.py
 
 ---
 
-## 📄 **License**
+##  **AI Assistance Disclosure**
+
+This project was developed with the help of AI coding tools, including:
+
+- GitHub Copilot  
+- OpenAI Codex / ChatGPT (via the Codex CLI)  
+- Anthropic Claude
+
+These tools were used for code generation, refactoring, and documentation drafts. All AI‑generated content was reviewed, edited, and integrated by the author, who remains responsible for the final design and correctness of the system.
+
+---
+
+##  **References**
+
+- Lewis, Patrick et al. “Retrieval-Augmented Generation for Knowledge-Intensive NLP.” NeurIPS 2020.  
+- Sentence-Transformers documentation – https://www.sbert.net/  
+- FastAPI documentation – https://fastapi.tiangolo.com/  
+- Azure Blob Storage documentation – https://learn.microsoft.com/azure/storage/blobs/  
+- Azure Cognitive Services (Document Intelligence) – https://learn.microsoft.com/azure/ai-services/document-intelligence/  
+- Example healthcare payer manuals and CMS Medicare Learning Network materials used as representative policy sources (for PDFs converted into this knowledge base).
+
+---
+
+##  **License**
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
